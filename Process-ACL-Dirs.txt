@@ -1,0 +1,1122 @@
+﻿ #requires -version 4
+<#
+.SYNOPSIS
+  Creates ACLS (Access Control Lists) against a set of folders
+.DESCRIPTION
+  This script will create ACLS (Access Control Lists) against a set of folders exported from source Solaris NFS Servers
+  The ACLS will be applied on a Nutanix NFS File System secured by Windows NTFS Security
+  The Process of the script is as follows:
+  Check if folder exists - if not skip any ACLS associated with it
+  1. If folder exists set owner on folder
+  2. If folder exists apply top-level POSIX permissions to owner, group and everyone
+  3. If folder exists apply ACLS to all security principals listed
+  4. If any of the owner, group, or other security principals do not exist an error is logged and the appropriate ACL is skipped
+.PARAMETER <Parameter_Name>
+  -Readonly             If True will not make any changes but will report on what will be changed if the value is False
+  -CreateMissingObjects If True will create missing folders, Active Directory users and groups (shouldnt be used in live environment)
+.INPUTS
+  C:\Scripts\ACLS\<Name of ACL Extract.txt>
+.OUTPUTS
+  C:\Scripts\ACL_$date.log
+.NOTES
+  Version:        1.0
+  Author:         Andrew Haughton
+  Creation Date:  25/10/2021
+  Purpose/Change: Initial script development
+  
+.EXAMPLE
+  Process-ACL -Readonly False -CreateMissingObjects False
+#>
+
+#---------------------------------------------------------[Initialisations]--------------------------------------------------------
+
+#Set Error Action to Silently Continue
+$ErrorActionPreference = "SilentlyContinue"
+
+#----------------------------------------------------------[Declarations]----------------------------------------------------------
+
+#Script Version
+$sScriptVersion = "1.0"
+
+
+
+#-----------------------------------------------------------[Functions]------------------------------------------------------------
+
+Function Check-Folder{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Check-Folder'
+  }
+   Process{
+    Try{
+          $Global:DirCheck     = $False
+          $Global:Match        = $False
+          $Pos = $Line.IndexOf('/')
+          $len = $Line.Length
+          $Folder = $Line.Substring($Pos,$Len-$Pos)
+          $compare = $Folder.Replace('/','')
+          ForEach($Map in $Folder_Mappings)
+          {    
+            $Source = $Map.Source.replace('/','')
+            $Type   = $Map.MapType
+
+            If($Folder.StartsWith($Map.Source) -and $Type -eq "Direct")
+            {   
+                #write-host "direct"
+                $Global:Dir = $Map.NTXMount+$Map.Target+$Folder.substring($map.source.Length)
+                $Global:Dir =$Global:Dir.replace('/','\')
+                $Global:Match = $True
+            }
+            ElseIf($Compare -match $Source -and $Type -eq "Indirect")
+            {
+                #write-host "comparing"
+                $Global:Dir =$Map.NTXMount+$Map.Target+$Folder.substring($map.source.Length)
+                $Global:Dir =$Global:Dir.replace('/','\')
+                $Global:Match = $True
+            }
+            Else
+            {
+                $Global:Match = $False
+            }
+            If($Global:Match -eq $True)
+            {
+                ForEach($Char in $CharArray)
+                {
+                    If(!($Global:Dir.Contains($char)))
+                    {   
+                        Try
+                        {
+                            Add-Content $LogFile "Checking $Global:Dir"
+                            #write-host "Checking $Global:Dir"
+                            Get-Item -path $Global:Dir -ErrorAction stop | Out-Null
+                            $Global:DirCheck = $True
+                            $Global:Item = $Global:Dir
+                            Add-FolderPerms
+                        }
+                        Catch
+                        {
+                            If($CreateMissingObjects -eq 'True')
+                            {
+                                 Create-Folder
+                                 $Global:Item = $Global:Dir
+                                 Add-FolderPerms
+                            }
+                            Else 
+                            {
+                                Add-Content $LogFile "$Global:Dir does not exist - ERROR!"
+                                #write-host "$Global:Dir does not exist - ERROR!" -ForegroundColor Red
+                                $Global:DirCheck = $False
+                            }
+                        }
+                    }
+                    Else
+                    {
+                        Add-Content $LogFile "$Global:Dir contains illegal character $Char - ERROR!"
+                        #write-host "$Global:Dir contains illegal character $Char - ERROR!" -ForegroundColor Red
+                        $Global:DirCheck = $False
+                    }
+                }
+            }
+            
+          }
+       }
+
+    Catch{
+            Add-Content $LogFile $error
+            #write-host "break"
+            Break
+         }
+  }
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Check-File{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Check-File'
+  }
+   Process{
+    Try{
+          $Global:FileCheck     = $False
+          $Global:Match        = $False
+          $Pos = $Line.IndexOf('/')
+          $len = $Line.Length
+          $File = $Line.Substring($Pos,$Len-$Pos)
+          $compare = $Line.Replace('/','')
+          $elements = $line.split() | Where-Object {$_} 
+          $Size = $elements[4]
+          $Size = [int64]$Size * 1024
+          ForEach($Map in $Folder_Mappings)
+          {    
+            $Source = $Map.Source.replace('/','')
+            $Type   = $Map.MapType
+
+            If($File.StartsWith($Map.Source) -and $Type -eq "Direct")
+            {   
+                #write-host "direct"
+                $Global:File = $Map.NTXMount+$Map.Target+$File.substring($map.source.Length)
+                $Global:File =$Global:Filr.replace('/','\')
+                $Global:Match = $True
+            }
+            ElseIf($Compare -match $Source -and $Type -eq "Indirect")
+            {
+                #write-host "comparing"
+                $Global:File =$Map.NTXMount+$Map.Target+$File.substring($map.source.Length)
+                $Global:File =$Global:File.replace('/','\')
+                $Global:Match = $True
+            }
+            Else
+            {
+                $Global:Match = $False
+            }
+            If($Global:Match -eq $True)
+            {
+                ForEach($Char in $CharArray)
+                {
+                    If(!($Global:File.Contains($char)))
+                    {   
+                        Try
+                        {
+                            Add-Content $LogFile "Checking $Global:File"
+                            #write-host "Checking $Global:File"
+                            Get-Item -path $Global:File -ErrorAction stop | Out-Null
+                            $Global:FileCheck = $True
+                            $Global:Item = $Global:File
+                            Add-FolderPerms
+                        }
+                        Catch
+                        {
+                            If($CreateMissingObjects -eq 'True')
+                            {
+                                 Create-File
+                                 $Global:Item = $Global:File
+                                 Add-FolderPerms
+                            }
+                            Else 
+                            {
+                                Add-Content $LogFile "$Global:File does not exist - ERROR!"
+                                #write-host "$Global:File does not exist - ERROR!" -ForegroundColor Red
+                                $Global:FileCheck = $False
+                            }
+                        }
+                    }
+                    Else
+                    {
+                        Add-Content $LogFile "$Global:File contains illegal character $Char - ERROR!"
+                        #write-host "$Global:File contains illegal character $Char - ERROR!" -ForegroundColor Red
+                        $GlobalFileCheck = $False
+                    }
+
+
+
+
+
+                }
+            }
+            
+          }
+       }
+
+    Catch{
+            Add-Content $LogFile $error
+            Break
+         }
+  }
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Create-Folder{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Create-Folder'
+  }
+   Process{
+    Try{
+            Add-Content $LogFile "Creating $Global:Dir"
+            #write-host "Creating $Global:Dir"
+            New-Item -Path $Global:Dir -ItemType Directory | Out-Null
+            $Global:DirCheck = $True
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Add-Content $LogFile "Cannot Create $Global:Dir"
+            #write-host "Cannot Create $Global:Dir"
+         }
+  }
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Create-File{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Create-File'
+  }
+   Process{
+    Try{
+            Add-Content $LogFile "Creating $Global:File"
+            #write-host "Creating $Global:File"
+            $fileObj = New-Object -TypeName System.IO.FileStream -ArgumentList $Global:File,Create,ReadWrite
+            $fileObj.SetLength(1)
+            $fileObj.Close()
+            $Global:FileCheck = $True
+
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Add-Content $LogFile "Cannot Create $Global:File"
+            #write-host "Cannot Create $Global:File"
+         }
+  }
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Add-FolderPerms{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Add-FolderPerms'
+  }
+
+   Process{
+    Try{
+            #write-host "adding folder perms"
+            $elements = $line.split() | Where-Object {$_} 
+            $ownerperms = $elements[0].Substring(1,3)
+            $groupperms = $elements[0].substring(4,3)
+            $userperms  = $elements[0].substring(7,3)
+            $OwnerArray = @()
+            $GroupArray = @()
+            $UserArray  = @()
+            $InheritArray = @()
+            $Global:Root = $False
+            $Rights = "allow"
+            $inheritarray += "None"
+            $Propogate = 'None'
+
+            if ($elements[1].substring(0,1) -match "[a-z,A-Z]")
+            {
+                $Global:owner      = $elements[1]
+                $Global:group      = $elements[2]
+            }
+            Else
+            {
+                $Global:owner      = $elements[2]
+                $Global:group      = $elements[3]
+            }
+
+
+            For($i=0; $i -lt 3; $i++)
+            {
+                $attrib =  $ownerperms.substring($i,1)
+                If(!($attrib -eq '-'))
+                {
+                    switch -CaseSensitive ( $attrib ) 
+                    {
+                        'r' { $OwnerArray+= 'ListDirectory', 'ReadData', 'Traverse', 'Read'}
+                        'w' { $OwnerArray+= 'CreateFiles', 'WriteData', 'Write'}
+                        'x' { $OwnerArray+= 'ExecuteFile'}
+                        's' { $OwnerArray+= 'ExecuteFile'}
+                        't' { $OwnerArray+= 'ExecuteFile'}
+                    }
+                }
+            }
+
+            If($Ownerarray.count -eq 0)
+            {
+                $OwnerArray = "None"
+            }
+
+             For($i=0; $i -lt 3; $i++)
+            {
+                $attrib =  $groupperms.substring($i,1)
+                If(!($attrib -eq '-'))
+                {
+                    switch -CaseSensitive ( $attrib ) 
+                    {
+                        'r' { $GroupArray+= 'ListDirectory', 'ReadData', 'Traverse', 'Read'}
+                        'w' { $GroupArray+= 'CreateFiles', 'WriteData', 'Write'}
+                        'x' { $GroupArray+= 'ExecuteFile'}
+                        's' { $GroupArray+= 'ExecuteFile'}
+                        't' { $GroupArray+= 'ExecuteFile'}
+                    }
+                }
+            }
+
+            If($Grouparray.count -eq 0)
+            {
+                $GroupArray = "None"
+            }
+
+             For($i=0; $i -lt 3; $i++)
+            {
+                $attrib =  $userperms.substring($i,1)
+                If(!($attrib -eq '-'))
+                {
+                    switch -CaseSensitive ( $attrib ) 
+                    {
+                        'r' { $UserArray+= 'ListDirectory', 'ReadData', 'Traverse', 'Read'}
+                        'w' { $UserArray+= 'CreateFiles', 'WriteData', 'Write'}
+                        'x' { $UserArray+= 'ExecuteFile'}
+                        's' { $USerArray+= 'ExecuteFile'}
+                        't' { $UserArray+= 'ExecuteFile'}
+                        'S' { $UserArray+= 'ExecuteFile'}
+                    }
+                }
+            }
+            If($Userarray.count -eq 0)
+            {
+                
+                $UserArray = "None"
+            }
+
+            $Global:Principal = $Owner
+            Add-Content $UserFile $Global:Principal
+
+            If($Global:Principal.substring(0,1) -eq 'u')
+            {
+                $Global:Principal = $Global:Principal.substring(1)
+            }
+           
+            
+            Check-User-Mapping
+            
+            If($UserCheck -eq $True)
+            {
+                Set-Owner
+                If(!($ownerarray -eq 'None'))
+                {
+                    $permarray = $OwnerArray
+                    Add-Perms
+                }
+                
+            }
+               
+            $Global:Principal = $Group
+            Add-Content $GroupFile $Global:Principal
+            Check-Group-Mapping
+            
+            If($GroupCheck -eq $True)
+            {
+                If(!($grouparray -eq 'None'))
+                {
+                    $permarray = $GroupArray
+                    Add-Perms
+                }
+               
+            }
+
+            If(!($userarray -eq 'None'))
+            {   
+                $Principal = 'Domain Users'
+                $permarray = $UserArray
+               
+                Add-Perms
+            }
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+
+Function Check-User-Mapping{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Set-Group'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Checking AD user mapping exists for $Principal"
+            #write-host "Checking AD user mapping exists for $Principal"
+            $Map =  $False
+            $Dest = $False
+            ForEach($UserMap in $User_Group_Mappings)
+            {
+                If($UserMap.Object -eq 'User' -and $UserMap.Source -eq $Principal)
+                {
+                    #write-host "mapped"
+                    $Map    = $True
+                    $Target = $userMap.Destination
+                    If(!($UserMap.Destination -eq ''))
+                    {
+                        #write-host "destination"
+                        $Dest = $True
+                    }
+                    
+                }
+            }
+
+            #write-host $Map $Dest
+            If($Map -eq $True)
+            {
+                If($Dest -eq $True)
+                {
+                    Add-Content $LogFile "Mapping User $Principal to $Target"
+                    #write-host "Mapping User $Principal to $Target" -ForegroundColor Yellow 
+                    #write-host $Target
+                    $Global:Principal = $Target
+                    Check-User
+                }
+                Else
+                {
+                    $Global:UserMSg = "No Mapping Exists for User $Principal - ERROR!"
+                    Add-Content $LogFile $Global:UserMSg
+                    #write-host $Global:UserMSg -ForegroundColor Yellow
+                    $Global:UserCheck = $False
+
+
+                } 
+            }
+            Else
+            {
+                Check-User
+            }
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Check-Group-Mapping{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Set-Group'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Checking AD group mapping exists for $Principal"
+            #write-host "Checking AD group mapping exists for $Principal"
+            $Map =  $False
+            $Dest = $False
+            ForEach($GroupMap in $User_Group_Mappings)
+            {
+                If($GroupMap.Object -eq 'Group' -and $GroupMap.Source -eq $Principal)
+                {
+                    #write-host "mapped"
+                    $Map    = $True
+                    $Target = $GroupMap.Destination
+                    If(!($GroupMap.Destination -eq ''))
+                    {
+                        #write-host "destination"
+                        $Dest = $True
+                    }
+                    
+                }
+            }
+
+            #write-host $Map $Dest
+            If($Map -eq $True)
+            {
+                If($Dest -eq $True)
+                {
+                    Add-Content $LogFile "Mapping Group $Principal to $Target"
+                    #write-host "Mapping Group $Principal to $Target" -ForegroundColor Yellow 
+                    #write-host $Target
+                    $Global:Principal = $Target
+                    Check-Group
+                }
+                Else
+                {
+                    $Global:GroupMSg = "No Mapping Exists for Group $Principal - ERROR!"
+                    Add-Content $LogFile $Global:GroupMSg
+                    #write-host $Global:GroupMSg -ForegroundColor Yellow
+                    $Global:GroupCheck = $False
+                }
+            }
+            Else
+            {
+                Check-Group
+            }
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Check-User{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Check-User'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Checking AD User exists for $Principal"
+            #write-host "Checking AD User exists for $Principal"
+            $Object = Get-ADUser -Identity $Principal
+            $Global:UserCheck = $True
+       }
+
+       Catch
+       {
+            If($createMissingObjects -eq $True)
+            {
+                Create-ADUser
+            }
+            Else
+            {
+                Add-Content $LogFile "NO AD user exists for $Principal - ERROR!"
+                #write-host "NO AD user exists for $Principal - ERROR!" -ForegroundColor red
+                $Global:UserCheck = $False
+            }
+                          
+        }
+
+      }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Set-Owner{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Set-Owner'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Setting Owner $Principal on $Global:Item"
+            #write-host "Setting Owner $Principal on $Global:Item"
+            $ACL = Get-ACL $Global:Item
+            $ID = new-object System.Security.Principal.NTAccount($domain, $Principal)
+            $ACL.SetOwner($ID)
+            If($Readonly -eq 'True')
+            {
+                Set-Acl -Path $Global:Item $ACL -WhatIf
+            }
+            Else
+            {
+                #write-host "setting owner"
+                Set-Acl -Path $Global:Item $ACL
+            }
+        }
+
+
+        
+
+
+
+    Catch{
+            #Add-Content $LogFile $error
+            
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Check-Group{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Set-Group'
+  }
+
+   Process{
+    Try{
+            Try{ 
+                    Add-Content $LogFile "Checking AD  group exists for $Principal"
+                    #write-host "Checking AD group exists for $Principal"
+                    $Object = Get-ADGroup -Identity $Principal
+                    $Global:GroupCheck = $True
+               }
+
+            Catch{
+                        if($CreateMissingObjects -eq $true)
+                        {
+                           Create-ADGroup
+                        }
+                        Else
+                        { 
+                            Add-Content $LogFile "NO AD Group exists for  $Principal - ERROR!"
+                            #write-host "NO AD group exists for $Principal - ERROR!" -ForegroundColor red
+                            $Global:GroupCheck = $False
+                        }
+                 }
+                               
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Create-ADUser{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Create-ADUser'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Creating AD user for $Principal"
+            #write-host "Creating AD user for $Principal"
+            $UPN  = "$($Principal)@$($Domain)"
+            New-ADUSer -Name $Principal  -GivenName $Principal -UserPrincipalName $UPN -Enabled $True  -Path $UserPath -AccountPassword $Password
+            $Global:usercheck = $true
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            $GroupTest = $Null
+            $GroupTest = Get-ADGroup -Identity $Principal
+            If(!($GroupTest -eq $Null))
+            {
+                $Global:UserMSg = "A Group exists for $Principal, cannot create user $Prinicipal - ERROR!"
+                $Global:Usercheck = $false
+            }
+            Else
+            {
+                $Global:UserMsg = "Cannot create AD User for $Principal - ERROR!"
+                $Global:Usercheck = $false
+            }
+
+            Add-Content $LogFile $Usermsg
+            #write-host  $Usermsg -ForegroundColor Red
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Create-ADGroup{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Create-ADUser'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Creating AD group for $Principal"
+            #write-host "Creating AD group for $Principal"
+            New-ADGroup -Name $Principal -Path $GroupPath -GroupScope Global -GroupCategory Security
+            $Global:groupcheck = $true
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            $UserTest = $Null
+            $UserTest = Get-User -Identity $Principal
+            If(!($UserTest -eq $Null))
+            {
+                $Global:GrouprMSg = "A Group exists for $Principal, cannot create user $Prinicipal - ERROR!"
+                $Global:Groupcheck = $false
+            }
+            Else
+            {
+                $Global:GroupMsg = "Cannot create  AD User for $Principal - ERROR!"
+                $Global:Grouipcheck = $false
+            }
+
+            Add-Content $LogFile $Groupmsg
+            #write-host  $Groupmsg -ForegroundColor Red
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+
+Function Add-Perms{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Add-Perms'
+  }
+
+   Process{
+    Try{
+            Add-Content $LogFile "Adding $rights $permarray permissions for $Principal on $Item with inheritance $inheritarray and propogation $propogate"
+            #write-host "Adding $rights $permarray permissions for $Principal on $Item with inheritance $inheritarray and propogation $propogate"
+            Add-Content $ACLLogFile $Item","$Principal",$permarray,"$inheritarray","$propogate","$rights
+            $ID = new-object System.Security.Principal.NTAccount($domain, $Principal)
+            $ACL = Get-ACL $Item
+            $AccessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($ID,$permarray,$inheritarray,$propogate,$rights)
+            $ACL.SetAccessRule($AccessRule)
+            If($Readonly -eq 'True')
+            {
+                $ACL | Set-Acl $Item -WhatIf
+            }
+            Else
+            {
+                $ACL | Set-Acl $Item
+            }
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+
+
+Function Add-Principals{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Add-Principls'
+  }
+
+   Process{
+    Try{
+          #write-host "add principals" -ForegroundColor yellow
+          $elements = $line.trim().split(":")
+          $Object    = $elements[0]
+          switch ( $Object )
+          {
+                'owner@'    { 
+                              $Principal = $owner
+                              Add-Content $UserFile $Principal
+                              if($Usercheck -eq $True)
+                              {
+                                If($Principal.substring(0,1) -eq 'u')
+                                {
+                                    $principal = $principal.substring(1)
+                                }
+                                $perms   = $elements[1]
+                                $inherit = $elements[2]
+                                $rights  = $elements[3]
+                                Check-USer-Mapping
+                                If($UserCheck -eq $True)
+                                {
+                                  Create-ACL
+                                }
+                              }
+                              Else
+                              {
+                                Add-Content $LogFile $UserMsg
+                                #write-host  "$UserMSg" -ForegroundColor Red
+                              }
+                            }
+                
+                'group@'    { 
+                              $Principal = $group
+                              Add-Content $GroupFile $Principal
+                              If($GroupCheck -eq $True)
+                              {
+                                $perms   = $elements[1]
+                                $inherit = $elements[2]
+                                $rights  = $elements[3]
+                                Check-Group-Mapping
+                                If($GroupCheck -eq $True)
+                                {
+                                  Create-ACL
+                                }
+                              }
+                              Else
+                              {
+                                Add-Content $LogFile $GroupMsg
+                                #write-host  "$GroupMSg" -ForegroundColor Red
+                              }
+                            }  
+
+                'everyone@' { 
+                                $Principal = 'Domain Users'
+                                $perms   = $elements[1]
+                                $inherit = $elements[2]
+                                $rights  = $elements[3]
+                                Create-ACL
+                            }
+
+                'user'      { 
+                                $Principal    = $elements[1]
+                                Add-Content $UserFile $Principal
+                                If($Principal.substring(0,1) -eq 'u')
+                                {
+                                    $principal = $principal.substring(1)
+                                }
+                                $perms   = $elements[2]
+                                $inherit = $elements[3]
+                                $rights  = $elements[4]
+                                Check-User-Mapping
+                                If($UserCheck -eq $True)
+                                {
+                                  Create-ACL
+                                }
+                            }
+                
+                'group'     { 
+                                $principal   = $elements[1]
+                                Add-Content $GroupFile $Principal
+                                $perms   = $elements[2]
+                                $inherit = $elements[3]
+                                $rights  = $elements[4]
+                                Check-Group-Mapping
+                                If($GroupCheck -eq $True)
+                                {
+                                  Create-ACL
+                                }
+                            }  
+          }
+
+
+
+        }
+      
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Create-ACL{
+  Param()
+
+  Begin{
+          #Add-Content $LogFile 'Create-ACL'
+  }
+
+   Process{
+    Try{
+            $permarray = @()
+            For($i=0; $i -lt 14; $i++)
+            {
+                $attrib =  $perms.substring($i,1)
+                If(!($attrib -eq '-'))
+                {
+                    Switch -CaseSensitive ( $attrib ) 
+                    {
+                        'r'  { $permarray+= 'ListDirectory', 'ReadData', 'Traverse', 'Read'}
+                        'w'  { $permarray+= 'CreateFiles', 'WriteData', 'Write'}
+                        'x'  { $permarray+= 'ExecuteFile'}
+                        'p'  { $permarray+= 'CreateDirectories', 'AppendData'}
+                        'd'  { $permarray+= 'Delete'}
+                        'D'  { $permarray+= 'DeleteSubdirectoriesandFiles'}
+                        'a'  { $permarray+= 'ReadAttributes'}
+                        'A'  { $permarray+= 'WriteAttributes'}
+                        'R'  { $permarray+= 'ReadExtendedAttributes'}
+                        'W'  { $permarray+= 'WriteExtendedAttributes'}
+                        'c'  { $permarray+= 'ReadPermissions'}
+                        'C'  { $permarray+= 'ChangePermissions'}
+                        'o'  { $permarray+= 'TakeOwnership'}
+                        's'  { $permarray+= 'Synchronize'}
+                    }
+                }
+ 
+            }
+
+             
+
+             $propogate = "None"
+             For($i=0; $i -lt $inherit.length; $i++)
+             {
+                $attrib =  $inherit.substring($i,1)
+                If(!($attrib -eq '-'))
+                {
+                    Switch -CaseSensitive ( $inherit ) 
+                    {
+                        'f'  { $inheritarray+= 'ObjectInherit'}
+                        'd'  { $inheritarray+= 'ContainerInherit'}
+                        'i'  { $propogate    = 'InheritOnly'}
+                        'I'  { $propogate    = 'InheritOnly'}
+                        
+                    }
+                }
+             }   
+            
+             If ($inheritarray -eq $null)
+             {
+                $inheritarray = "None"
+             }
+            
+             Add-Perms
+            
+        
+       }
+       
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+Function Process-ACL{
+  Param
+    (
+         [Parameter(Mandatory=$true, Position=0)]
+         [string] $ACLFile,
+         [Parameter(Mandatory=$true, Position=1)]
+         [ValidateSet(“True”,”False”)]
+         [string] $Readonly,
+         [Parameter(Mandatory=$true, Position=2)]
+         [ValidateSet(“True”,”False”)]
+         [string] $CreateMissingObjects
+    )
+
+  Begin{
+          #Log File Info
+          $Date                = Get-Date -Format ddMMMyyyyhhmmss
+          $StartDAte           = Get-Date
+          $LPOs                = $ACLFile.LastIndexOf('\')
+          $RPOs                = $ACLFile.Length - $Lpos
+          $FileName            = $ACLFIle.Substring($LPos+1,$RPos-1)
+          $LogFile             = "c:\scripts\logs\Logs\$($FileName).log"
+          $ACLLogFile          = "C:\scripts\logs\ACLS\$($FileName).CSV"
+          $GroupFile           = "C:\scripts\logs\Groups\$($FileName).log"
+          $UserFile            = "C:\scripts\logs\Users\$($FileName).log"
+          $Folder_Mappings     = Import-CSV  'C:\scripts\folder_mappings.csv'
+          $User_Group_Mappings = Import-CSV 'C:\Scripts\user_group_mappings.csv'
+          $Domain              = "link2.gpn.gov.uk"
+          $GroupPath           = "OU=Data Security Groups,OU=DWH,OU=D&A,OU=Windows 2016,OU=Crown Hosting Servers,DC=link2,DC=gpn,DC=gov,DC=uk"
+          $UserPath            = "OU=Users,OU=SAS,OU=Production,OU=DWH,OU=D&A,OU=Windows 2016,OU=Crown Hosting Servers,DC=link2,DC=gpn,DC=gov,DC=uk"
+          $CharArray           =  @("?")
+          $Password            = (ConvertTo-SecureString -AsPlainText 'Nut4n1xT3st123!'  -Force)
+          $Headers             = "Directory,User/Group,Permissions,Inheritance,Propagation,Rights"
+
+          Add-Content $ACLLogFile $Headers
+          #Add-Content $LogFile 'Process-ACL'
+          Add-Content $Logfile "Using ACL File $ACLFile"
+          #write-host "Using ACL File $ACLFile" -ForegroundColor Yellow
+          Add-Content $Logfile "Running Script in Readonlymode: $Readonly"
+          #write-host "Running Script in Readonlymode: $Readonly" -ForegroundColor Yellow
+          Add-Content $Logfile "Creating Missing Objects: $CreateMissingObjects"
+          #write-host "Creating Missing Objects: $CreateMissingObjects" -ForegroundColor Yellow
+
+  }
+
+   Process{
+    Try{
+          #Process the ACL export line by line 
+          $Lines = get-content $ACLFile
+          If($Lines[0].Substring(0,1) -ne 'd' -and $Lines[0].Substring(0,1) -ne '-')
+          {
+            $Lines = $Lines | Select -Skip 1
+          } 
+          ForEach($Line in $Lines)
+          {
+            If($Line.Substring(0,1) -eq 'd')
+            {
+                Check-Folder
+            }
+            
+            ElseIf($Line.Substring(0,1) -eq '-')
+            {
+                Check-File
+            }
+            
+            Else
+            {   
+                If($Global:DirCheck -eq $True)
+                {
+                    Add-Principals
+                }
+            }
+           
+           }
+
+          $Groups = Get-Content $GroupFile
+          $Groups = $Groups | sort -Unique | Set-Content $GroupFile
+
+          $Users = Get-Content $UserFile
+          $Users = $Users | sort -Unique | Set-Content $UserFile
+
+
+          $EndDate = Get-Date
+          Add-Content $Logfile "Elapsed Time: $(($EndDate-$StartDate).TotalMinutes) Minutes"
+          #write-host "Elapsed Time: $(($EndDate-$StartDate).TotalMinutes) Minutes" -ForegroundColor Yellow
+        }
+
+    Catch{
+            #Add-Content $LogFile $error
+            Break
+    }
+  }
+
+  End{
+    If($?){
+    }
+  }
+}
+
+
+Process-ACL -ACLFile 'C:\scripts\acls\dirs\srv14092-vm-cdp_centric-sas_dir_2022-03-07.out' -Readonly False -CreateMissingObjects True
